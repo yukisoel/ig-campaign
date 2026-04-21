@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IGキャンペーン候補抽出</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f2f5;
+      min-height: 100vh;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding: 40px 16px;
+    }
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.1);
+      padding: 36px;
+      width: 100%;
+      max-width: 560px;
+    }
+    h1 { font-size: 22px; color: #1a1a2e; margin-bottom: 4px; }
+    .subtitle { font-size: 13px; color: #888; margin-bottom: 28px; }
+    label { display: block; font-size: 13px; font-weight: 600; color: #444; margin-bottom: 6px; margin-top: 18px; }
+    input[type="text"], input[type="number"], select {
+      width: 100%; padding: 10px 14px; border: 1px solid #ddd;
+      border-radius: 8px; font-size: 14px; color: #333; outline: none;
+    }
+    .btn-primary {
+      width: 100%; margin-top: 24px; padding: 13px;
+      background: #e1306c; color: #fff; border: none;
+      border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer;
+    }
+    .btn-primary:disabled { background: #ccc; cursor: not-allowed; }
+    .btn-download {
+      width: 100%; margin-top: 12px; padding: 13px;
+      background: #28a745; color: #fff; border: none;
+      border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer;
+    }
+    .status-box {
+      margin-top: 24px; padding: 16px; background: #f8f9ff;
+      border-radius: 8px; border-left: 4px solid #4a90d9; display: none;
+    }
+    .status-box.error { background: #fff5f5; border-left-color: #e53e3e; }
+    .status-title { font-size: 13px; font-weight: 700; color: #4a90d9; margin-bottom: 8px; }
+    .status-box.error .status-title { color: #e53e3e; }
+    .status-log { font-size: 13px; color: #555; line-height: 1.8; }
+    .result-box {
+      margin-top: 20px; padding: 16px; background: #f0fff4;
+      border-radius: 8px; border-left: 4px solid #28a745; display: none;
+    }
+    .result-count { font-size: 18px; font-weight: 700; color: #1a7a3a; }
+    .result-sub { font-size: 12px; color: #666; margin-top: 2px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>IGキャンペーン候補抽出</h1>
+    <p class="subtitle">Instagram公開投稿のいいね・コメントユーザーをCSVで出力（最大各1,000件）</p>
+
+    <div id="form-area">
+      <label>投稿URL</label>
+      <input type="text" id="post-url" placeholder="https://www.instagram.com/p/XXXXXXXXX/">
+
+      <label>抽出モード</label>
+      <select id="mode">
+        <option value="like_only">いいねのみ</option>
+        <option value="comment_only">コメントのみ</option>
+        <option value="both_required">いいね＋コメント（どちらかでOK）</option>
+      </select>
+
+      <label>最低フォロワー数（これ未満は除外）</label>
+      <input type="number" id="min-followers" value="1000" min="0" step="500">
+
+      <button class="btn-primary" id="start-btn" onclick="startExtraction()">抽出開始</button>
+    </div>
+
+    <div class="status-box" id="status-box">
+      <div class="status-title" id="status-title">処理中...</div>
+      <div class="status-log" id="status-log"></div>
+    </div>
+
+    <div class="result-box" id="result-box">
+      <div class="result-count" id="result-count"></div>
+      <div class="result-sub" id="result-sub"></div>
+      <button class="btn-download" onclick="downloadCSV()">CSVダウンロード</button>
+    </div>
+  </div>
+
+  <script>
+    var extractedData = [];
+    var currentMode = '';
+
+    function startExtraction() {
+      var postUrl = document.getElementById('post-url').value.trim();
+      var mode = document.getElementById('mode').value;
+      var minFollowers = parseInt(document.getElementById('min-followers').value, 10) || 0;
+
+      if (!postUrl) { alert('投稿URLを入力してください'); return; }
+      if (postUrl.indexOf('/p/') === -1) {
+        alert('投稿URL（/p/を含むURL）を入力してください');
+        return;
+      }
+
+      currentMode = mode;
+      extractedData = [];
+      document.getElementById('start-btn').disabled = true;
+      showStatus('スクレイピングを開始しています...');
+
+      var runIds = {};
+      var pendingStarts = 0;
+
+      if (mode === 'like_only' || mode === 'both_required') {
+        pendingStarts++;
+        google.script.run
+          .withSuccessHandler(function(runId) {
+            runIds.likes = runId;
+            addLog('いいね取得中...');
+            pendingStarts--;
+            if (pendingStarts === 0) { fetchResults(runIds, mode, minFollowers, postUrl); }
+          })
+          .withFailureHandler(showError)
+          .startLikes(postUrl);
+      }
+
+      if (mode === 'comment_only' || mode === 'both_required') {
+        pendingStarts++;
+        google.script.run
+          .withSuccessHandler(function(runId) {
+            runIds.comments = runId;
+            addLog('コメント取得中...');
+            pendingStarts--;
+            if (pendingStarts === 0) { fetchResults(runIds, mode, minFollowers, postUrl); }
+          })
+          .withFailureHandler(showError)
+          .startComments(postUrl);
+      }
+    }
+
+    function fetchResults(runIds, mode, minFollowers, postUrl) {
+      addLog('データ処理中（数分かかる場合があります）...');
+      google.script.run
+        .withSuccessHandler(function(results) {
+          extractedData = results;
+          showResult(results, minFollowers);
+        })
+        .withFailureHandler(showError)
+        .getResults({
+          likesRunId: runIds.likes || null,
+          commentsRunId: runIds.comments || null,
+          mode: mode,
+          minFollowers: minFollowers,
+          postUrl: postUrl
+        });
+    }
+
+    function showStatus(msg) {
+      var box = document.getElementById('status-box');
+      box.className = 'status-box';
+      box.style.display = 'block';
+      document.getElementById('status-title').textContent = msg;
+      document.getElementById('status-log').innerHTML = '';
+      document.getElementById('result-box').style.display = 'none';
+    }
+
+    function addLog(msg) {
+      var log = document.getElementById('status-log');
+      log.innerHTML = log.innerHTML + msg + '<br>';
+    }
+
+    function showResult(results, minFollowers) {
+      document.getElementById('status-box').style.display = 'none';
+      document.getElementById('start-btn').disabled = false;
+      var box = document.getElementById('result-box');
+      box.style.display = 'block';
+      document.getElementById('result-count').textContent = '抽出完了：' + results.length + ' 人';
+      document.getElementById('result-sub').textContent = 'フォロワー' + minFollowers.toLocaleString() + '人以上・フォロワー数降順';
+    }
+
+    function showError(error) {
+      var box = document.getElementById('status-box');
+      box.className = 'status-box error';
+      box.style.display = 'block';
+      document.getElementById('status-title').textContent = 'エラーが発生しました';
+      document.getElementById('status-log').textContent = error.message || String(error);
+      document.getElementById('start-btn').disabled = false;
+    }
+
+    function downloadCSV() {
+      if (!extractedData.length) { return; }
+      var includeComment = (currentMode !== 'like_only');
+      var headers = ['id_name', 'profile_url', 'follower_count'];
+      if (includeComment) { headers.push('comment'); }
+
+      var rows = [headers.join(',')];
+      for (var i = 0; i < extractedData.length; i++) {
+        var r = extractedData[i];
+        var comment = (r.comments || []).join('\n').split('"').join('""');
+        var row = [
+          '@' + r.username,
+          'https://www.instagram.com/' + r.username + '/',
+          r.followerCount || ''
+        ];
+        if (includeComment) { row.push('"' + comment + '"'); }
+        rows.push(row.join(','));
+      }
+
+      var csv = '\uFEFF' + rows.join('\n');
+      var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      var now = new Date();
+      var dateStr = now.getFullYear().toString() +
+        ('0' + (now.getMonth() + 1)).slice(-2) +
+        ('0' + now.getDate()).slice(-2);
+      a.download = 'ig_campaign_' + dateStr + '.csv';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+  </script>
+</body>
+</html>
