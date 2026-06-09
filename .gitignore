@@ -5,3 +5,6 @@ __pycache__/
 .DS_Store
 accounts.json
 session_*.json
+.venv/
+jobs.json
+jobs.json.bak*
