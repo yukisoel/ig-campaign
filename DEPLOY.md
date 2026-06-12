@@ -85,9 +85,35 @@ sudo systemctl enable --now ig-campaign
 
 ### Streamlit Community Cloud
 
-1. GitHub リポジトリを連携
-2. `app.py` をエントリポイントに指定
-3. Secrets に `APIFY_TOKEN` および `accounts` 配列を登録（`.streamlit/secrets.toml.example` 参照）
+#### デプロイ手順
+
+1. https://share.streamlit.io/ にアクセスし、GitHubアカウントでサインイン
+2. 「Create app」→「Deploy a public app from GitHub」を選択
+3. リポジトリ: `yukisoel/ig-campaign`、Branch: `main`、Main file path: `app.py`
+4. 「Advanced settings」→ Python version: `3.11`
+5. 「Secrets」エディタに `.streamlit/secrets.toml.example` の内容を実値で貼り付け
+6. 「Deploy!」をクリック → 初回ビルドに3〜5分
+
+#### 運用上の重要な注意
+
+**揮発性ストレージ**: Streamlit Cloud のコンテナは再起動するたびにファイルが消えます。
+- `accounts.json` → 消えるが、起動時に Secrets から自動再読込されるので **アカウントは必ず Secrets に書く**
+- `jobs.json` → 消える。実行中ジョブのチェックポイントも失われる
+- `output/` の CSV → 消える。完了したら速やかにダウンロードする運用
+
+**休眠（スリープ）**:
+- 約7日間アクセスがないとアプリが休眠状態になる
+- 休眠中はジョブも止まる。誰かがURLを開けば自動復帰する
+- 長時間ジョブ（30分以上）を回す場合は、念のため別タブで起動URLを開いたままにしておくと安心
+
+**再起動でジョブが中断された場合**:
+- 「ジョブ一覧」タブから `interrupted` 状態のジョブを選んで「再開」ボタン
+- チェックポイント（取得済みID）を引き継いで続きから走る
+
+**Public 公開の注意**:
+- URLを知っていれば誰でもアクセス可能
+- Secrets に書いたIGセッションIDがUI操作で間接的に流出するリスクは低いが、**URLは関係者のみに共有する**
+- より厳格に制限したい場合は、後から Settings →「Sharing」で Private 化（メールアドレスでアクセス制限）に切替可
 
 ---
 
