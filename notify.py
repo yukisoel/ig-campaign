@@ -1,35 +1,36 @@
-"""Email notifications via Gmail SMTP.
+"""Email notifications via Resend HTTP API.
 
 ジョブ完了/エラー時にメール通知する。資格情報は Streamlit Secrets から読む。
 失敗してもジョブ本体は止めない（ベストエフォート）。
+
+Resend は HTTP API 経由なので、Workspace の SMTP/App Password 制限を回避できる。
 """
+import base64
 import os
-import smtplib
-import ssl
-from email.message import EmailMessage
 from typing import Sequence
 
+import requests
 import streamlit as st
 
 
-SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 587
-SMTP_TIMEOUT = 30
+RESEND_URL = "https://api.resend.com/emails"
+HTTP_TIMEOUT = 30
 
 
-def _get_creds() -> tuple[str, str]:
+def _get_config() -> tuple[str, str]:
+    """Returns (api_key, from_address)."""
     try:
-        user = st.secrets.get("GMAIL_USER", "") or os.environ.get("GMAIL_USER", "")
-        pw = st.secrets.get("GMAIL_APP_PASSWORD", "") or os.environ.get("GMAIL_APP_PASSWORD", "")
+        key = st.secrets.get("RESEND_API_KEY", "") or os.environ.get("RESEND_API_KEY", "")
+        sender = st.secrets.get("RESEND_FROM", "") or os.environ.get("RESEND_FROM", "")
     except Exception:
-        user = os.environ.get("GMAIL_USER", "")
-        pw = os.environ.get("GMAIL_APP_PASSWORD", "")
-    return user, pw
+        key = os.environ.get("RESEND_API_KEY", "")
+        sender = os.environ.get("RESEND_FROM", "")
+    return key, sender
 
 
 def enabled() -> bool:
-    user, pw = _get_creds()
-    return bool(user and pw)
+    key, sender = _get_config()
+    return bool(key and sender)
 
 
 def send(
@@ -38,36 +39,46 @@ def send(
     body: str,
     attachments: list[tuple[str, bytes, str]] | None = None,
 ) -> bool:
-    """Gmail SMTP で送信。失敗時は print してFalseを返す（例外は投げない）。
+    """Resend API で送信。失敗時は print してFalseを返す（例外は投げない）。
 
     attachments: [(filename, content_bytes, mime_type)]
+    mime_type は Resend 側でファイル名から推測されるため、API ペイロードには含めない。
     """
-    user, pw = _get_creds()
-    if not (user and pw):
-        print("[notify] GMAIL_USER / GMAIL_APP_PASSWORD 未設定。通知スキップ。")
+    key, sender = _get_config()
+    if not (key and sender):
+        print("[notify] RESEND_API_KEY / RESEND_FROM 未設定。通知スキップ。")
         return False
     if not to:
         return False
 
-    msg = EmailMessage()
-    msg["From"] = user
-    msg["To"] = ", ".join(to)
-    msg["Subject"] = subject
-    msg.set_content(body)
-
+    payload: dict = {
+        "from": sender,
+        "to": list(to),
+        "subject": subject,
+        "text": body,
+    }
     if attachments:
-        for filename, content, mime in attachments:
-            maintype, _, subtype = mime.partition("/")
-            if not subtype:
-                maintype, subtype = "application", "octet-stream"
-            msg.add_attachment(content, maintype=maintype, subtype=subtype, filename=filename)
+        payload["attachments"] = [
+            {
+                "filename": filename,
+                "content": base64.b64encode(content).decode("ascii"),
+            }
+            for filename, content, _mime in attachments
+        ]
 
     try:
-        ctx = ssl.create_default_context()
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT) as smtp:
-            smtp.starttls(context=ctx)
-            smtp.login(user, pw)
-            smtp.send_message(msg)
+        r = requests.post(
+            RESEND_URL,
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=HTTP_TIMEOUT,
+        )
+        if r.status_code >= 300:
+            print(f"[notify] resend failed: {r.status_code} {r.text}")
+            return False
         print(f"[notify] sent to {to}: {subject}")
         return True
     except Exception as e:

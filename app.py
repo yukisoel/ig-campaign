@@ -728,7 +728,7 @@ with tab_main:
             notify_help = (
                 f"完了/エラー時にメール通知。@{NOTIFY_DOMAIN} は自動付与。複数宛先はカンマ区切り。空欄なら通知なし。"
                 if notify.enabled()
-                else "メール通知は無効（GMAIL_USER / GMAIL_APP_PASSWORD 未設定）"
+                else "メール通知は無効（RESEND_API_KEY / RESEND_FROM 未設定）"
             )
             notify_input = st.text_input(
                 f"通知先メール（@{NOTIFY_DOMAIN} 自動付与）",
@@ -776,9 +776,9 @@ with tab_accounts:
     else:
         st.caption("💾 ストレージ: ローカルファイルのみ（GITHUB_TOKEN / GITHUB_DATA_REPO 未設定）")
     if notify.enabled():
-        st.caption("📧 メール通知: 有効（Gmail SMTP）")
+        st.caption("📧 メール通知: 有効（Resend）")
     else:
-        st.caption("📭 メール通知: 無効（GMAIL_USER / GMAIL_APP_PASSWORD 未設定）")
+        st.caption("📭 メール通知: 無効（RESEND_API_KEY / RESEND_FROM 未設定）")
     st.subheader("アカウント一覧")
     accounts = get_accounts()
 
