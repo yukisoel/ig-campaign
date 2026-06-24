@@ -17,6 +17,8 @@ from dotenv import load_dotenv
 from instagrapi import Client
 from instagrapi.exceptions import LoginRequired
 
+import storage
+
 load_dotenv()
 
 APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "")
@@ -58,6 +60,7 @@ def load_data() -> dict:
 def save_data(data: dict):
     with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    storage.push(ACCOUNTS_FILE, data, sync=True)
 
 
 def get_accounts() -> list[dict]:
@@ -170,12 +173,14 @@ def _load_jobs_raw() -> list[dict]:
         return []
 
 
-def _save_jobs_raw(jobs: list[dict]):
-    """アトミック書き込み: tmpに書いてからrenameする。書き込み中のファイルを読まれて壊れるのを防ぐ。"""
+def _save_jobs_raw(jobs: list[dict], sync: bool = False):
+    """アトミック書き込み: tmpに書いてからrenameする。書き込み中のファイルを読まれて壊れるのを防ぐ。
+    sync=Trueなら GitHub への push も即時実行（再起動を超えて確実に残したい状態遷移用）。"""
     tmp = JOBS_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(jobs, f, ensure_ascii=False, indent=2)
     os.replace(tmp, JOBS_FILE)
+    storage.push(JOBS_FILE, jobs, sync=sync)
 
 
 def load_jobs() -> list[dict]:
@@ -198,11 +203,13 @@ def add_job(params: dict) -> str:
     with _jobs_lock:
         jobs = _load_jobs_raw()
         jobs.append(job)
-        _save_jobs_raw(jobs)
+        _save_jobs_raw(jobs, sync=True)
     return job_id
 
 
 def update_job(job_id: str, log_append: str | None = None, **kwargs):
+    # 終了状態（done/error/interrupted/cancelled）の遷移は GitHub にも即時反映
+    sync = kwargs.get("status") in ("done", "error", "interrupted", "cancelled")
     with _jobs_lock:
         jobs = _load_jobs_raw()
         for job in jobs:
@@ -212,14 +219,14 @@ def update_job(job_id: str, log_append: str | None = None, **kwargs):
                 for k, v in kwargs.items():
                     job[k] = v
                 break
-        _save_jobs_raw(jobs)
+        _save_jobs_raw(jobs, sync=sync)
 
 
 def delete_job(job_id: str):
     with _jobs_lock:
         jobs = _load_jobs_raw()
         jobs = [j for j in jobs if j["id"] != job_id]
-        _save_jobs_raw(jobs)
+        _save_jobs_raw(jobs, sync=True)
 
 
 # ---------------------------------------------------------------------------
@@ -569,7 +576,7 @@ def update_job_account(job_id: str, new_account: dict):
                 )
                 # キャッシュされた古いClientは使わせない
                 break
-        _save_jobs_raw(jobs)
+        _save_jobs_raw(jobs, sync=True)
     with _client_lock:
         # 新アカウントでログインし直すよう、古いキャッシュをクリア
         _client_cache.clear()
@@ -601,11 +608,14 @@ def export_partial_csv(job_id: str) -> tuple[str | None, int]:
 
 
 # ---------------------------------------------------------------------------
-# 起動時: 中断されたジョブをクリーンアップ（1回だけ実行）
+# 起動時: GitHubから状態を復元 → 中断されたジョブをクリーンアップ（1回だけ実行）
 # ---------------------------------------------------------------------------
 @st.cache_resource
-def _cleanup_stale_jobs():
-    """サーバープロセス起動時に1回だけ実行（st.cache_resourceで保証）"""
+def _startup():
+    """サーバープロセス起動時に1回だけ実行（st.cache_resourceで保証）。
+    Streamlit Cloud のコンテナ再起動でローカルファイルは消えるため、
+    GitHub の永続ストレージから accounts.json / jobs.json を復元する。"""
+    storage.hydrate([ACCOUNTS_FILE, JOBS_FILE])
     with _jobs_lock:
         jobs = _load_jobs_raw()
         changed = False
@@ -615,9 +625,9 @@ def _cleanup_stale_jobs():
                 job["log"].append("⏸ サーバー再起動により中断（再開可能）")
                 changed = True
         if changed:
-            _save_jobs_raw(jobs)
+            _save_jobs_raw(jobs, sync=True)
 
-_cleanup_stale_jobs()
+_startup()
 
 # ---------------------------------------------------------------------------
 # Streamlit UI
@@ -686,6 +696,10 @@ with tab_main:
 # タブ3: アカウント管理（ジョブ一覧の自動リフレッシュより先に描画する）
 # ===========================================================================
 with tab_accounts:
+    if storage.enabled():
+        st.caption("☁️ ストレージ: GitHub 永続化が有効")
+    else:
+        st.caption("💾 ストレージ: ローカルファイルのみ（GITHUB_TOKEN / GITHUB_DATA_REPO 未設定）")
     st.subheader("アカウント一覧")
     accounts = get_accounts()
 
