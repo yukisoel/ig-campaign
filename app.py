@@ -726,16 +726,23 @@ with tab_main:
             mode_label = st.selectbox("抽出モード", list(MODE_OPTIONS.keys()))
             min_followers = st.number_input("最低フォロワー数（これ未満は除外）", min_value=0, value=1000, step=500)
             notify_help = (
-                f"完了/エラー時にメール通知。@{NOTIFY_DOMAIN} は自動付与。複数宛先はカンマ区切り。空欄なら通知なし。"
+                f"完了/エラー時にメール通知。複数宛先はカンマ区切り（例: takeda, hanada）。空欄なら通知なし。"
                 if notify.enabled()
                 else "メール通知は無効（RESEND_API_KEY / RESEND_FROM 未設定）"
             )
-            notify_input = st.text_input(
-                f"通知先メール（@{NOTIFY_DOMAIN} 自動付与）",
-                placeholder="takeda, hanada",
-                help=notify_help,
-                disabled=not notify.enabled(),
-            )
+            col_email, col_domain = st.columns([2, 1])
+            with col_email:
+                notify_input = st.text_input(
+                    "通知先メール",
+                    placeholder="takeda",
+                    help=notify_help,
+                    disabled=not notify.enabled(),
+                )
+            with col_domain:
+                st.markdown(
+                    f"<div style='margin-top: 1.95rem; padding-top: 0.4rem; color: rgba(250,250,250,0.7);'>@{NOTIFY_DOMAIN}</div>",
+                    unsafe_allow_html=True,
+                )
             submitted = st.form_submit_button("抽出開始", type="primary", use_container_width=True)
 
         if submitted:
