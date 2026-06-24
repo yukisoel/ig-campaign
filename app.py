@@ -17,9 +17,12 @@ from dotenv import load_dotenv
 from instagrapi import Client
 from instagrapi.exceptions import LoginRequired
 
+import notify
 import storage
 
 load_dotenv()
+
+NOTIFY_DOMAIN = "soel-tokyo.jp"
 
 APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "")
 ACCOUNTS_FILE = "accounts.json"
@@ -439,6 +442,54 @@ def _save_checkpoint(job_id: str, checkpoint: dict, **kwargs):
     update_job(job_id, checkpoint=checkpoint, **kwargs)
 
 
+def _notify_terminal(job_id: str):
+    """ジョブ終了（done/error）時にメール通知。失敗してもジョブ本体は止めない。"""
+    try:
+        if not notify.enabled():
+            return
+        job = next((j for j in load_jobs() if j["id"] == job_id), None)
+        if not job:
+            return
+        emails = job["params"].get("notify_emails") or []
+        if not emails:
+            return
+        p = job["params"]
+        status = job["status"]
+        post_url = p.get("post_url", "")
+        if status == "done":
+            subject = f"[IG抽出] 完了: {p['account_name']}"
+            body = (
+                f"IGキャンペーン候補抽出が完了しました。\n\n"
+                f"アカウント: {p['account_name']} (@{p['username']})\n"
+                f"投稿URL: {post_url}\n"
+                f"モード: {MODE_LABELS.get(p['mode'], p['mode'])}\n"
+                f"最低フォロワー: {p['min_followers']:,}\n"
+                f"ジョブID: {job['id']}\n\n"
+                f"結果CSVを添付しています。\n"
+            )
+            attachments = []
+            result_path = job.get("result_path")
+            if result_path and os.path.exists(result_path):
+                with open(result_path, "rb") as f:
+                    attachments.append((os.path.basename(result_path), f.read(), "text/csv"))
+            notify.send(emails, subject, body, attachments=attachments or None)
+        elif status == "error":
+            subject = f"[IG抽出] エラー: {p['account_name']}"
+            log_tail = "\n".join(job.get("log", [])[-30:])
+            body = (
+                f"IGキャンペーン候補抽出でエラーが発生しました。\n\n"
+                f"アカウント: {p['account_name']} (@{p['username']})\n"
+                f"投稿URL: {post_url}\n"
+                f"ジョブID: {job['id']}\n"
+                f"エラー: {job.get('error') or '（詳細なし）'}\n\n"
+                f"--- ログ末尾 ---\n{log_tail}\n\n"
+                f"ツールの「ジョブ一覧」から「再開」ボタンでチェックポイントから続行できる場合があります。\n"
+            )
+            notify.send(emails, subject, body)
+    except Exception as e:
+        print(f"[notify] _notify_terminal failed: {e}")
+
+
 def run_job(job_id: str):
     jobs = load_jobs()
     job = next((j for j in jobs if j["id"] == job_id), None)
@@ -535,6 +586,7 @@ def run_job(job_id: str):
 
         update_job(job_id, status="done", result_path=result_path,
                    log_append=f"✅ 完了！{len(filtered)} 人")
+        _notify_terminal(job_id)
 
     except JobCancelled:
         pass  # ステータスは既にcancelledに更新済み
@@ -543,9 +595,11 @@ def run_job(job_id: str):
             _client_cache.pop(f"ig_client_{params['username']}", None)
         msg = str(e) or "セッション切れ。アカウント管理からセッションIDを更新してください。"
         update_job(job_id, status="error", error=msg, log_append=f"❌ {msg}")
+        _notify_terminal(job_id)
     except Exception as e:
         update_job(job_id, status="error", error=str(e),
                    log_append=f"❌ エラー: {e}（チェックポイントから再開できます）")
+        _notify_terminal(job_id)
 
 
 def submit_job(params: dict) -> str:
@@ -671,6 +725,17 @@ with tab_main:
             post_url = st.text_input("投稿URL", placeholder="https://www.instagram.com/p/XXXXXXXXX/")
             mode_label = st.selectbox("抽出モード", list(MODE_OPTIONS.keys()))
             min_followers = st.number_input("最低フォロワー数（これ未満は除外）", min_value=0, value=1000, step=500)
+            notify_help = (
+                f"完了/エラー時にメール通知。@{NOTIFY_DOMAIN} は自動付与。複数宛先はカンマ区切り。空欄なら通知なし。"
+                if notify.enabled()
+                else "メール通知は無効（GMAIL_USER / GMAIL_APP_PASSWORD 未設定）"
+            )
+            notify_input = st.text_input(
+                f"通知先メール（@{NOTIFY_DOMAIN} 自動付与）",
+                placeholder="takeda, hanada",
+                help=notify_help,
+                disabled=not notify.enabled(),
+            )
             submitted = st.form_submit_button("抽出開始", type="primary", use_container_width=True)
 
         if submitted:
@@ -680,6 +745,12 @@ with tab_main:
                 st.error("投稿URL（/p/ を含むURL）を入力してください")
             else:
                 selected = next(a for a in accounts if a["name"] == selected_name)
+                notify_emails: list[str] = []
+                for raw in (notify_input or "").split(","):
+                    user = raw.strip()
+                    if not user:
+                        continue
+                    notify_emails.append(user if "@" in user else f"{user}@{NOTIFY_DOMAIN}")
                 params = {
                     "account_name": selected["name"],
                     "username": selected["username"],
@@ -687,9 +758,13 @@ with tab_main:
                     "post_url": post_url.strip(),
                     "mode": MODE_OPTIONS[mode_label],
                     "min_followers": int(min_followers),
+                    "notify_emails": notify_emails,
                 }
                 submit_job(params)
-                st.success("ジョブを登録しました。「ジョブ一覧」タブで進捗を確認できます。")
+                msg = "ジョブを登録しました。「ジョブ一覧」タブで進捗を確認できます。"
+                if notify_emails:
+                    msg += f"\n\n完了/エラー時に {', '.join(notify_emails)} へメール通知します。"
+                st.success(msg)
 
 
 # ===========================================================================
@@ -700,6 +775,10 @@ with tab_accounts:
         st.caption("☁️ ストレージ: GitHub 永続化が有効")
     else:
         st.caption("💾 ストレージ: ローカルファイルのみ（GITHUB_TOKEN / GITHUB_DATA_REPO 未設定）")
+    if notify.enabled():
+        st.caption("📧 メール通知: 有効（Gmail SMTP）")
+    else:
+        st.caption("📭 メール通知: 無効（GMAIL_USER / GMAIL_APP_PASSWORD 未設定）")
     st.subheader("アカウント一覧")
     accounts = get_accounts()
 
